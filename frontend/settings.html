@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>U6 Web Logger – Settings</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+<header>
+  <h1>U6 / U6-Pro Impact Logger – Settings</h1>
+  <nav>
+    <a href="/index.html">Live</a>
+    <a href="/settings.html">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Output & Meta</h2>
+    <div class="grid-2">
+      <div>
+        <label for="output_dir">Output Folder</label>
+        <input id="output_dir" type="text" placeholder="C:\\Logs\\U6 or /home/user/u6_logs">
+        <div class="small">Folder where CSV, events, history, errors and PDF report are written.</div>
+      </div>
+      <div>
+        <label for="client">Client</label>
+        <input id="client" type="text">
+        <label for="item" style="margin-top:6px;">Item</label>
+        <input id="item" type="text">
+      </div>
+    </div>
+    <label for="notes" style="margin-top:10px;">Notes</label>
+    <textarea id="notes" rows="4" placeholder="Free-form notes for the report header."></textarea>
+    <label style="margin-top:10px;">
+      <input id="export_only_after_trigger" type="checkbox">
+      Only include data <b>after trigger</b> in stats/report
+    </label>
+  </section>
+
+  <section class="card">
+    <h2>Stream Settings</h2>
+    <div class="grid-3">
+      <div>
+        <label for="scan_frequency">Scan Frequency (Hz)</label>
+        <input id="scan_frequency" type="number" min="1" step="1">
+      </div>
+      <div>
+        <label for="resolution_index">Resolution Index (0–8)</label>
+        <input id="resolution_index" type="number" min="0" max="8" step="1">
+      </div>
+      <div>
+        <label for="settling_factor">Settling Factor</label>
+        <input id="settling_factor" type="number" min="0" step="1">
+      </div>
+      <div>
+        <label for="duration_sec">Duration if No Trigger (s)</label>
+        <input id="duration_sec" type="number" min="0" step="0.1">
+      </div>
+      <div>
+        <label for="ui_plot_hz">Live Plot Rate (Hz)</label>
+        <input id="ui_plot_hz" type="number" min="10" step="10">
+        <div class="small">Sub-sampled UI rate. CSV stays at full sample rate.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Trigger Settings</h2>
+    <div class="grid-3">
+      <div>
+        <label><input id="trig_enable" type="checkbox"> Enable Trigger</label>
+      </div>
+      <div>
+        <label for="trigger_ain">Analog Trigger AIN</label>
+        <input id="trigger_ain" type="number" min="0" max="13" step="1">
+      </div>
+      <div>
+        <label for="threshold_volts">Threshold (V)</label>
+        <input id="threshold_volts" type="number" step="0.01">
+      </div>
+      <div>
+        <label><input id="rising" type="checkbox"> Rising edge (analog)</label>
+      </div>
+      <div>
+        <label for="pre_samples">Pre-samples</label>
+        <input id="pre_samples" type="number" min="0" step="1">
+      </div>
+      <div>
+        <label for="post_samples">Post-samples</label>
+        <input id="post_samples" type="number" min="0" step="1">
+      </div>
+      <div>
+        <label for="safety_timeout_sec">Safety timeout (s)</label>
+        <input id="safety_timeout_sec" type="number" min="1" step="1">
+      </div>
+    </div>
+
+    <hr style="border-color:#233647; margin:14px 0;">
+
+    <h3 style="font-size:0.95rem; margin-top:4px;">Digital Trigger (FIO/EIO/CIO/MIO)</h3>
+    <div class="grid-3">
+      <div>
+        <label><input id="use_digital" type="checkbox"> Use Digital Trigger</label>
+        <div class="small">When enabled, analog trigger settings are ignored.</div>
+      </div>
+      <div>
+        <label for="digital_line">Digital Line (0–19, 20=MIO)</label>
+        <input id="digital_line" type="number" min="0" max="20" step="1">
+      </div>
+      <div>
+        <label><input id="digital_rising" type="checkbox"> Edge: Rising</label>
+        <div class="small">If off, falling edge trigger.</div>
+      </div>
+      <div>
+        <label><input id="digital_level_mode" type="checkbox"> Level mode</label>
+        <div class="small">Trigger when pin is at active level (no edge).</div>
+      </div>
+      <div>
+        <label><input id="digital_active_high" type="checkbox"> Active High (level)</label>
+        <div class="small">If off, active low.</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Channels</h2>
+    <p class="small">
+      Define up to 4 channels. Disabled rows are ignored. AIN must match the physical wiring;
+      labels are used in the plots and report. Multiplier scales volts → engineering units.
+    </p>
+    <table class="table" id="channels-table">
+      <thead>
+        <tr>
+          <th>Enabled</th>
+          <th>AIN</th>
+          <th>Label</th>
+          <th>Multiplier</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- rows injected by JS -->
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <button id="btn-save">Save Settings</button>
+    <span id="save-status" class="small"></span>
+  </section>
+</main>
+
+<script>
+const chanBody = document.querySelector('#channels-table tbody');
+const saveStatus = document.getElementById('save-status');
+
+function makeChannelRow(idx, cfg) {
+  const tr = document.createElement('tr');
+
+  const tdEn = document.createElement('td');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.id = 'ch_en_' + idx;
+  cb.checked = !!cfg.enabled;
+  tdEn.appendChild(cb);
+  tr.appendChild(tdEn);
+
+  const tdAin = document.createElement('td');
+  const ain = document.createElement('input');
+  ain.type = 'number';
+  ain.min = '0';
+  ain.max = '13';
+  ain.step = '1';
+  ain.id = 'ch_ain_' + idx;
+  ain.value = cfg.ain ?? 0;
+  tdAin.appendChild(ain);
+  tr.appendChild(tdAin);
+
+  const tdLabel = document.createElement('td');
+  const lab = document.createElement('input');
+  lab.type = 'text';
+  lab.id = 'ch_label_' + idx;
+  lab.value = cfg.label ?? ('CH' + idx);
+  tdLabel.appendChild(lab);
+  tr.appendChild(tdLabel);
+
+  const tdMult = document.createElement('td');
+  const mult = document.createElement('input');
+  mult.type = 'number';
+  mult.step = '0.0001';
+  mult.id = 'ch_mult_' + idx;
+  mult.value = cfg.multiplier ?? 1.0;
+  tdMult.appendChild(mult);
+  tr.appendChild(tdMult);
+
+  chanBody.appendChild(tr);
+}
+
+function loadSettings() {
+  fetch('/api/settings')
+    .then(r => r.json())
+    .then(cfg => {
+      document.getElementById('output_dir').value = cfg.output_dir || '';
+      document.getElementById('client').value = cfg.client || '';
+      document.getElementById('item').value = cfg.item || '';
+      document.getElementById('notes').value = cfg.notes || '';
+      document.getElementById('export_only_after_trigger').checked = !!cfg.export_only_after_trigger;
+
+      const s = cfg.stream || {};
+      document.getElementById('scan_frequency').value = s.scan_frequency ?? 50000;
+      document.getElementById('resolution_index').value = s.resolution_index ?? 0;
+      document.getElementById('settling_factor').value = s.settling_factor ?? 0;
+      document.getElementById('duration_sec').value = s.duration_sec ?? 5;
+      document.getElementById('ui_plot_hz').value = s.ui_plot_hz ?? 100;
+
+      const t = cfg.trigger || {};
+      document.getElementById('trig_enable').checked = !!t.enable;
+      document.getElementById('trigger_ain').value = t.trigger_ain ?? 0;
+      document.getElementById('threshold_volts').value = t.threshold_volts ?? 1.0;
+      document.getElementById('rising').checked = (t.rising !== false);
+      document.getElementById('pre_samples').value = t.pre_samples ?? 4000;
+      document.getElementById('post_samples').value = t.post_samples ?? 4000;
+      document.getElementById('safety_timeout_sec').value = t.safety_timeout_sec ?? 15;
+
+      document.getElementById('use_digital').checked = !!t.use_digital;
+      document.getElementById('digital_line').value = t.digital_line ?? 0;
+      document.getElementById('digital_rising').checked = (t.digital_rising !== false);
+      document.getElementById('digital_level_mode').checked = !!t.digital_level_mode;
+      document.getElementById('digital_active_high').checked = (t.digital_active_high !== false);
+
+      chanBody.innerHTML = '';
+      const channels = cfg.channels || [];
+      const maxRows = Math.max(4, channels.length);
+      for (let i = 0; i < maxRows; i++) {
+        const c = channels[i] || {
+          ain: i,
+          label: 'CH' + i,
+          multiplier: 1.0,
+          enabled: (i === 0)
+        };
+        makeChannelRow(i, c);
+      }
+    })
+    .catch(err => {
+      console.error('Failed to load settings', err);
+      saveStatus.textContent = 'Failed to load settings.';
+    });
+}
+
+document.getElementById('btn-save').addEventListener('click', () => {
+  const payload = {
+    output_dir: document.getElementById('output_dir').value || '',
+    client: document.getElementById('client').value || '',
+    item: document.getElementById('item').value || '',
+    notes: document.getElementById('notes').value || '',
+    export_only_after_trigger: document.getElementById('export_only_after_trigger').checked,
+    stream: {
+      scan_frequency: parseInt(document.getElementById('scan_frequency').value || '50000', 10),
+      resolution_index: parseInt(document.getElementById('resolution_index').value || '0', 10),
+      settling_factor: parseInt(document.getElementById('settling_factor').value || '0', 10),
+      duration_sec: parseFloat(document.getElementById('duration_sec').value || '5'),
+      ui_plot_hz: parseInt(document.getElementById('ui_plot_hz').value || '100', 10)
+    },
+    trigger: {
+      enable: document.getElementById('trig_enable').checked,
+      trigger_ain: parseInt(document.getElementById('trigger_ain').value || '0', 10),
+      threshold_volts: parseFloat(document.getElementById('threshold_volts').value || '1'),
+      rising: document.getElementById('rising').checked,
+      pre_samples: parseInt(document.getElementById('pre_samples').value || '4000', 10),
+      post_samples: parseInt(document.getElementById('post_samples').value || '4000', 10),
+      safety_timeout_sec: parseFloat(document.getElementById('safety_timeout_sec').value || '15'),
+      use_digital: document.getElementById('use_digital').checked,
+      digital_line: parseInt(document.getElementById('digital_line').value || '0', 10),
+      digital_rising: document.getElementById('digital_rising').checked,
+      digital_level_mode: document.getElementById('digital_level_mode').checked,
+      digital_active_high: document.getElementById('digital_active_high').checked,
+      digital_debounce_ms: 0
+    },
+    channels: []
+  };
+
+  const rows = chanBody.querySelectorAll('tr');
+  rows.forEach((tr, idx) => {
+    const en = tr.querySelector('#ch_en_' + idx);
+    const ain = tr.querySelector('#ch_ain_' + idx);
+    const lab = tr.querySelector('#ch_label_' + idx);
+    const mult = tr.querySelector('#ch_mult_' + idx);
+    payload.channels.push({
+      enabled: en.checked,
+      ain: parseInt(ain.value || '0', 10),
+      label: lab.value || ('CH' + idx),
+      multiplier: parseFloat(mult.value || '1')
+    });
+  });
+
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  })
+  .then(r => r.json())
+  .then(d => {
+    if (!d.ok) throw new Error('Save failed');
+    saveStatus.textContent = 'Settings saved.';
+    setTimeout(() => { saveStatus.textContent = ''; }, 2000);
+  })
+  .catch(err => {
+    console.error(err);
+    saveStatus.textContent = 'Save failed.';
+  });
+});
+
+loadSettings();
+</script>
+</body>
+</html>

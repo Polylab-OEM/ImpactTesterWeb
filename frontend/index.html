@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>U6 Web Logger – Live</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>U6 / U6-Pro Impact Logger – Live View</h1>
+  <nav>
+    <a href="/index.html">Live</a>
+    <a href="/settings.html">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Control</h2>
+    <p class="status-line">
+      Status:
+      <span id="status-text">–</span>
+      <span id="status-badge" class="badge">idle</span>
+    </p>
+    <button id="btn-start">Start Capture</button>
+    <button id="btn-stop" class="secondary">Stop</button>
+    <button id="btn-stats" class="secondary">Show Stats</button>
+    <button id="btn-report" class="secondary">Export PDF Report</button>
+    <p class="small">
+      Start will arm the trigger (analog or digital) with pre/post samples as defined in settings.
+      Live chart is sub-sampled for speed; CSV and report use full-rate data.
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>Live Signals</h2>
+    <div class="chart-container">
+      <canvas id="live-chart"></canvas>
+    </div>
+    <p class="small" id="live-note"></p>
+  </section>
+
+  <section class="card" id="stats-card" style="display:none;">
+    <h2>Channel Statistics (Last Capture)</h2>
+    <table class="table" id="stats-table"></table>
+  </section>
+</main>
+
+<script>
+const statusText = document.getElementById('status-text');
+const statusBadge = document.getElementById('status-badge');
+const btnStart = document.getElementById('btn-start');
+const btnStop = document.getElementById('btn-stop');
+const btnStats = document.getElementById('btn-stats');
+const btnReport = document.getElementById('btn-report');
+const statsCard = document.getElementById('stats-card');
+const statsTable = document.getElementById('stats-table');
+const liveNote = document.getElementById('live-note');
+
+let chart;
+let chartLabels = [];
+let chartDatasets = [];
+
+function initChart() {
+  const ctx = document.getElementById('live-chart').getContext('2d');
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: chartLabels,
+      datasets: []
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      interaction: { mode: 'nearest', intersect: false },
+      scales: {
+        x: { title: { display: true, text: 'Time (s)' } },
+        y: { title: { display: true, text: 'Scaled units' } }
+      }
+    }
+  });
+}
+
+function updateStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(d => {
+      statusText.textContent = d.status || '–';
+      const running = d.running;
+      statusBadge.textContent = running ? 'running' : 'idle';
+      statusBadge.className = 'badge ' + (running ? 'ok' : '');
+    })
+    .catch(() => {});
+}
+
+function pollLive() {
+  fetch('/api/live')
+    .then(r => r.json())
+    .then(d => {
+      const t = d.t || [];
+      const y = d.y || [];
+      liveNote.textContent = t.length ? ('UI points: ' + t.length + ' (sub-sampled)') : 'No data yet.';
+      if (!t.length || !y.length) return;
+
+      chartLabels.length = 0;
+      for (let i = 0; i < t.length; i++) chartLabels.push(t[i].toFixed(5));
+
+      if (!chartDatasets.length || chartDatasets.length !== y.length) {
+        chartDatasets.length = 0;
+        for (let i = 0; i < y.length; i++) {
+          chartDatasets.push({
+            label: 'CH' + i,
+            data: [],
+            borderWidth: 1,
+            pointRadius: 0
+          });
+        }
+        chart.data.datasets = chartDatasets;
+      }
+
+      for (let i = 0; i < y.length; i++) {
+        chartDatasets[i].data.length = 0;
+        const row = y[i];
+        for (let j = 0; j < row.length; j++) {
+          chartDatasets[i].data.push(row[j]);
+        }
+      }
+
+      chart.update('none');
+    })
+    .catch(() => {});
+}
+
+btnStart.addEventListener('click', () => {
+  fetch('/api/start', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) alert('Start failed: ' + JSON.stringify(d));
+      updateStatus();
+    })
+    .catch(async err => {
+      const txt = await err?.text?.() || err;
+      alert('Start error: ' + txt);
+    });
+});
+
+btnStop.addEventListener('click', () => {
+  fetch('/api/stop', {method:'POST'})
+    .then(() => updateStatus())
+    .catch(() => {});
+});
+
+btnStats.addEventListener('click', () => {
+  fetch('/api/stats')
+    .then(r => {
+      if (!r.ok) throw new Error('Stats error');
+      return r.json();
+    })
+    .then(d => {
+      const headers = d.headers || [];
+      const rows = d.rows || [];
+      let html = '<thead><tr>';
+      headers.forEach(h => html += '<th>' + h + '</th>');
+      html += '</tr></thead><tbody>';
+      rows.forEach(r => {
+        html += '<tr>';
+        r.forEach(c => html += '<td>' + c + '</td>');
+        html += '</tr>';
+      });
+      html += '</tbody>';
+      statsTable.innerHTML = html;
+      statsCard.style.display = 'block';
+    })
+    .catch(err => {
+      alert('Stats not available yet. Run a capture first.');
+      console.error(err);
+    });
+});
+
+btnReport.addEventListener('click', () => {
+  window.open('/api/export/report', '_blank');
+});
+
+initChart();
+updateStatus();
+setInterval(updateStatus, 1000);
+setInterval(pollLive, 200);
+
+</script>
+</body>
+</html>

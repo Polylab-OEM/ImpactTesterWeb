@@ -1,0 +1,5 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.0
+matplotlib==3.9.2
+labjack-ljm; platform_system != "Windows"
+LabJackPython; platform_system == "Windows"
