@@ -49,7 +49,7 @@ BASE_DIR = os.path.dirname(THIS_DIR)
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 STATIC_DIR = os.path.join(FRONTEND_DIR, "static")
 SETTINGS_PATH = os.path.join(BASE_DIR, "u6_web_settings.json")
-
+CLEANUP_AFTER_EXPORT = True  # set True if you want to delete run data after export
 app = FastAPI(title="U6 Web Logger")
 
 app.add_middleware(
@@ -114,7 +114,14 @@ def _status_cb(msg: str):
     global acq_status
     acq_status = msg
 
-
+def _related_paths(csvp: str):
+    base, _ = os.path.splitext(csvp)
+    return {
+        "csv": csvp,
+        "events": base + "_events.csv",
+        "history": base + "_history.csv",
+        "errors": base + "_errors.csv",
+    }
 def _sample_cb(batch_t, batch_scaled):
     global live_t, live_y
     with live_lock:
@@ -326,39 +333,63 @@ def _first_trigger_time(csv_path: str) -> Optional[float]:
     return None
 
 
-def _load_timeseries(csv_path: str, only_after_trigger: bool):
+def _load_timeseries(csv_path: str, cfg: AppSettings):
+    """
+    Load time series from CSV and (optionally) crop to a window around the trigger.
+    Window is defined via pre_samples / post_samples and scan_frequency.
+    """
     if not os.path.exists(csv_path):
         raise RuntimeError("CSV not found.")
+
     times: List[float] = []
     series: Dict[str, List[float]] = {}
     labels: List[str] = []
+
+    # Window config
+    only_after_trigger = bool(cfg.export_only_after_trigger)
+    fs = float(cfg.stream.scan_frequency or 0.0)
+    pre_samples = int(getattr(cfg.trigger, "pre_samples", 0) or 0)
+    post_samples = int(getattr(cfg.trigger, "post_samples", 0) or 0)
+
+    pre_win = pre_samples / fs if fs > 0 else None
+    post_win = post_samples / fs if fs > 0 else None
+    trig_t = _first_trigger_time(csv_path) if only_after_trigger else None
 
     with open(csv_path, "r", encoding="utf-8") as f:
         rdr = csv.reader(f)
         header = next(rdr, None)
         if not header or "t_seconds" not in header:
             raise RuntimeError("CSV missing t_seconds header.")
+
         t_idx = header.index("t_seconds")
         scaled_idxs = [(i, name) for i, name in enumerate(header) if name.endswith("_scaled")]
         labels = [name.replace("_scaled", "") for _, name in scaled_idxs]
         for _, name in scaled_idxs:
             series[name] = []
 
-        trig_t = _first_trigger_time(csv_path) if only_after_trigger else None
-
         for row in rdr:
             try:
                 t = float(row[t_idx])
             except Exception:
                 continue
-            if only_after_trigger and trig_t is not None and t < trig_t:
-                continue
+
+            # Apply trigger-based window if enabled
+            if only_after_trigger and trig_t is not None:
+                if pre_win is not None and post_win is not None:
+                    if t < (trig_t - pre_win) or t > (trig_t + post_win):
+                        continue
+                else:
+                    # Fallback: just drop pre-trigger samples
+                    if t < trig_t:
+                        continue
+
             times.append(t)
             for i, name in scaled_idxs:
                 try:
                     series[name].append(float(row[i]))
                 except Exception:
                     series[name].append(float("nan"))
+
     return times, series, labels
 
 
@@ -402,29 +433,52 @@ def get_stats():
     try:
         with settings_lock:
             cfg = current_settings
+
         times, series, labels = _load_timeseries(
-            last_csv_path, only_after_trigger=cfg.export_only_after_trigger
+            last_csv_path, cfg
         )
         headers, rows = _compute_stats(times, series)
-        return {"headers": headers, "rows": rows}
+
+        # Optional: return window info for the UI
+        window_info = {
+            "export_only_after_trigger": bool(cfg.export_only_after_trigger),
+            "pre_samples": int(getattr(cfg.trigger, "pre_samples", 0) or 0),
+            "post_samples": int(getattr(cfg.trigger, "post_samples", 0) or 0),
+            "scan_frequency": int(cfg.stream.scan_frequency or 0),
+        }
+
+        return {"headers": headers, "rows": rows, "window": window_info}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get("/api/export/report")
-def export_report():
+from fastapi import Body
+import tempfile
+import zipfile
+
+def _export_report_impl(include_data: bool = False, overrides: Dict[str, Any] | None = None):
+    """
+    Core implementation for export report.
+    include_data=True → returns a ZIP with PDF + CSV (+events/history/errors if present).
+    overrides can contain: client, item, notes, datetime (all optional).
+    """
     global last_csv_path
     if not last_csv_path:
         raise HTTPException(status_code=400, detail="No capture yet.")
+
     csvp = last_csv_path
+    overrides = overrides or {}
+
     with settings_lock:
         cfg = current_settings
-    only_after = bool(cfg.export_only_after_trigger)
 
     try:
-        times, series, labels = _load_timeseries(csvp, only_after_trigger=only_after)
+        times, series, labels = _load_timeseries(csvp, cfg)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+    if not times or not series:
+        raise HTTPException(status_code=500, detail="No time-series data found in CSV.")
 
     out_dir = os.path.dirname(csvp)
     base = os.path.splitext(os.path.basename(csvp))[0]
@@ -432,39 +486,62 @@ def export_report():
 
     headers, rows = _compute_stats(times, series)
 
+    # --- Describe window (trigger cropping) ---
+    only_after = bool(cfg.export_only_after_trigger)
+    fs = float(cfg.stream.scan_frequency or 0.0)
+    pre_samples = int(getattr(cfg.trigger, "pre_samples", 0) or 0)
+    post_samples = int(getattr(cfg.trigger, "post_samples", 0) or 0)
+    pre_win = pre_samples / fs if fs > 0 else None
+    post_win = post_samples / fs if fs > 0 else None
+
+    if only_after:
+        if pre_win is not None and post_win is not None:
+            window_str = f"Data window: trigger ± ({pre_win:.4g} s pre, {post_win:.4g} s post)"
+        else:
+            window_str = "Data window: only samples after trigger"
+    else:
+        window_str = "Data window: full record (no trigger cropping)"
+
+    # --- Build stats bullet list ---
     lines = []
     for ch, n, vmin, vmax, tmax, mean, rms in rows:
         lines.append(
-            "• %s: max %s @ %ss, mean %s, RMS %s" % (ch, vmax or "-", tmax or "-", mean or "-", rms or "-")
+            f"• {ch}: max {vmax or '-'} @ {tmax or '-'} s, mean {mean or '-'}, RMS {rms or '-'}"
         )
     stats_block = "\n".join(lines) if lines else "(no stats)"
 
     from datetime import datetime as _dt
     import textwrap as _tw
 
-    dtstr = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-    notes = (cfg.notes or "").strip()
+    # Use overrides if provided, otherwise fall back to cfg / now
+    dtstr = overrides.get("datetime") or _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    client = overrides.get("client") if overrides.get("client") is not None else (cfg.client or "-")
+    item = overrides.get("item") if overrides.get("item") is not None else (cfg.item or "-")
+    notes_raw = overrides.get("notes") if overrides.get("notes") is not None else (cfg.notes or "")
+    notes = (notes_raw or "").strip()
     wrapped_notes = "\n".join(_tw.wrap(notes, width=95)) if notes else ""
 
+    # --- Create PDF ---
     with PdfPages(pdf_path) as pdf:
-        fig1 = Figure(figsize=(8.27, 11.69), dpi=100)
+        # PAGE 1 – Header + stats + window info
+        fig1 = Figure(figsize=(8.27, 11.69), dpi=100)  # A4 portrait
         ax1 = fig1.add_subplot(111)
         ax1.axis("off")
         text_lines = [
             "Impact Test Report",
             "",
-            "Date/Time: %s" % dtstr,
-            "Client: %s" % (cfg.client or "-"),
-            "Item: %s" % (cfg.item or "-"),
+            f"Date/Time: {dtstr}",
+            f"Client: {client or '-'}",
+            f"Item: {item or '-'}",
             "",
             "Notes:",
             wrapped_notes,
             "",
-            "CSV: %s" % os.path.basename(csvp),
-            "Samples (used): %d" % len(times),
+            f"CSV: {os.path.basename(csvp)}",
+            f"Samples (used): {len(times)}",
             "Channels: %s" % (", ".join(labels) if labels else "-"),
             "",
-            "(Only data after trigger included)" if only_after else "(Full record included)",
+            window_str,
             "",
             "Channel Stats:",
             stats_block,
@@ -472,7 +549,7 @@ def export_report():
         ax1.text(0.04, 0.96, "\n".join(text_lines), va="top", ha="left")
         pdf.savefig(fig1)
 
-        from matplotlib.backends.backend_agg import FigureCanvasAgg  # imported here to keep top tidy
+        # PAGE 2 – All channels overlay vs time
         fig2 = Figure(figsize=(8.27, 5.0), dpi=100)
         ax2 = fig2.add_subplot(111)
         ax2.set_title("Scaled Signals vs Time")
@@ -485,16 +562,18 @@ def export_report():
             ax2.legend(loc="best")
         pdf.savefig(fig2)
 
+        # PAGE 3+ – One page per channel
         for name, y in series.items():
             label = name.replace("_scaled", "")
             fig_ch = Figure(figsize=(8.27, 5.0), dpi=100)
             ax_ch = fig_ch.add_subplot(111)
-            ax_ch.set_title("%s vs Time" % label)
+            ax_ch.set_title(f"{label} vs Time")
             ax_ch.set_xlabel("Time (s)")
             ax_ch.set_ylabel(label)
             ax_ch.plot(times, y)
             pdf.savefig(fig_ch)
 
+        # LAST PAGE – Settings snapshot as JSON
         fig3 = Figure(figsize=(8.27, 11.69), dpi=100)
         ax3 = fig3.add_subplot(111)
         ax3.axis("off")
@@ -509,8 +588,66 @@ def export_report():
         )
         pdf.savefig(fig3)
 
-    return FileResponse(
-        pdf_path,
-        media_type="application/pdf",
-        filename=os.path.basename(pdf_path),
-    )
+    # If user only wants PDF, return it now
+    if not include_data:
+        resp = FileResponse(
+            pdf_path,
+            media_type="application/pdf",
+            filename=os.path.basename(pdf_path),
+        )
+    else:
+        # Bundle PDF + CSV + related files into a temp ZIP
+        paths = _related_paths(csvp)
+        tmp_fd, tmp_zip_path = tempfile.mkstemp(suffix=".zip")
+        os.close(tmp_fd)
+        with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+            # Always include PDF
+            z.write(pdf_path, arcname=os.path.basename(pdf_path))
+            # Include data files if present
+            for key, p in paths.items():
+                if os.path.exists(p):
+                    z.write(p, arcname=os.path.basename(p))
+
+        resp = FileResponse(
+            tmp_zip_path,
+            media_type="application/zip",
+            filename=base + "_report_and_data.zip",
+        )
+
+    # Optional cleanup (temp-style behaviour)
+    if CLEANUP_AFTER_EXPORT:
+        try:
+            paths = _related_paths(csvp)
+            for p in paths.values():
+                if os.path.exists(p):
+                    os.remove(p)
+        except Exception:
+            pass  # best-effort
+
+    return resp
+
+
+@app.get("/api/export/report")
+def export_report_get():
+    # Old behaviour: just PDF, using saved settings
+    return _export_report_impl(include_data=False, overrides={})
+
+
+@app.post("/api/export/report")
+def export_report_post(body: Dict[str, Any] = Body(...)):
+    """
+    Body can contain:
+      - client: str
+      - item: str
+      - notes: str
+      - datetime: str (e.g. "2025-12-03 17:12:16")
+      - include_data: bool (default True)
+    """
+    include_data = bool(body.get("include_data", True))
+    overrides = {
+        "client": body.get("client"),
+        "item": body.get("item"),
+        "notes": body.get("notes"),
+        "datetime": body.get("datetime"),
+    }
+    return _export_report_impl(include_data=include_data, overrides=overrides)

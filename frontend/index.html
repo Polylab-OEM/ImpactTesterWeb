@@ -25,13 +25,40 @@
     </p>
     <button id="btn-start">Start Capture</button>
     <button id="btn-stop" class="secondary">Stop</button>
-    <button id="btn-stats" class="secondary">Show Stats</button>
+    <!-- <button id="btn-stats" class="secondary">Show Stats</button>
     <button id="btn-report" class="secondary">Export PDF Report</button>
-    <p class="small">
+    <p class="small"> -->
       Start will arm the trigger (analog or digital) with pre/post samples as defined in settings.
       Live chart is sub-sampled for speed; CSV and report use full-rate data.
     </p>
   </section>
+<section class="card">
+  <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;">
+    <div>
+      <button id="btn-show-stats">Show Stats</button>
+      <button id="btn-download-report" style="margin-left:8px;">Download Report (PDF)</button>
+    </div>
+    <div id="peak-summary" class="small"></div>
+  </div>
+
+  <div id="stats-panel" style="display:none; margin-top:10px;">
+    <table class="table" id="stats-table">
+      <thead>
+        <tr>
+          <th>Channel</th>
+          <th>N</th>
+          <th>Min</th>
+          <th>Max</th>
+          <th>Max @ t (s)</th>
+          <th>Mean</th>
+          <th>RMS</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div id="stats-window-info" class="small" style="margin-top:6px;"></div>
+  </div>
+</section>
 
   <section class="card">
     <h2>Live Signals</h2>
@@ -45,6 +72,35 @@
     <h2>Channel Statistics (Last Capture)</h2>
     <table class="table" id="stats-table"></table>
   </section>
+  <!-- Report dialog -->
+<div id="report-dialog" class="modal hidden">
+  <div class="modal-content">
+    <h3>Export Report</h3>
+
+    <label for="report-datetime">Date/Time</label>
+    <input id="report-datetime" type="text" placeholder="YYYY-MM-DD HH:MM:SS">
+
+    <label for="report-client" style="margin-top:6px;">Client</label>
+    <input id="report-client" type="text">
+
+    <label for="report-item" style="margin-top:6px;">Item</label>
+    <input id="report-item" type="text">
+
+    <label for="report-notes" style="margin-top:6px;">Notes</label>
+    <textarea id="report-notes" rows="3"></textarea>
+
+    <label style="margin-top:6px;">
+      <input id="report-include-data" type="checkbox" checked>
+      Include CSV + event files in download (ZIP)
+    </label>
+
+    <div class="dialog-actions">
+      <button id="report-cancel">Cancel</button>
+      <button id="report-generate">Generate</button>
+    </div>
+  </div>
+</div>
+
 </main>
 
 <script>
@@ -52,8 +108,8 @@ const statusText = document.getElementById('status-text');
 const statusBadge = document.getElementById('status-badge');
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
-const btnStats = document.getElementById('btn-stats');
-const btnReport = document.getElementById('btn-report');
+// const btnStats = document.getElementById('btn-stats');
+// const btnReport = document.getElementById('btn-report');
 const statsCard = document.getElementById('stats-card');
 const statsTable = document.getElementById('stats-table');
 const liveNote = document.getElementById('live-note');
@@ -151,35 +207,174 @@ btnStop.addEventListener('click', () => {
     .catch(() => {});
 });
 
-btnStats.addEventListener('click', () => {
+const btnShowStats = document.getElementById('btn-show-stats');
+
+const statsPanel = document.getElementById('stats-panel');
+const statsBody = document.querySelector('#stats-table tbody');
+const peakSummary = document.getElementById('peak-summary');
+const statsWindowInfo = document.getElementById('stats-window-info');
+
+btnShowStats.addEventListener('click', () => {
   fetch('/api/stats')
     .then(r => {
-      if (!r.ok) throw new Error('Stats error');
+      if (!r.ok) throw new Error('Stats request failed');
       return r.json();
     })
-    .then(d => {
-      const headers = d.headers || [];
-      const rows = d.rows || [];
-      let html = '<thead><tr>';
-      headers.forEach(h => html += '<th>' + h + '</th>');
-      html += '</tr></thead><tbody>';
-      rows.forEach(r => {
-        html += '<tr>';
-        r.forEach(c => html += '<td>' + c + '</td>');
-        html += '</tr>';
+    .then(data => {
+      const headers = data.headers || [];
+      const rows = data.rows || [];
+      const window = data.window || {};
+
+      // Build table rows
+      statsBody.innerHTML = '';
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        row.forEach((cell, idx) => {
+          const td = document.createElement('td');
+          td.textContent = cell;
+          tr.appendChild(td);
+        });
+        statsBody.appendChild(tr);
       });
-      html += '</tbody>';
-      statsTable.innerHTML = html;
-      statsCard.style.display = 'block';
+
+      // Show panel
+      statsPanel.style.display = 'block';
+
+      // Compute & display peak summary (for "Force" or whatever is highest)
+      let peakRow = null;
+      rows.forEach(r => {
+        const vmax = parseFloat(r[3]);  // "Max" column
+        if (!isNaN(vmax)) {
+          if (!peakRow || vmax > parseFloat(peakRow[3])) {
+            peakRow = r;
+          }
+        }
+      });
+
+      if (peakRow) {
+        const chName = peakRow[0];
+        const vmax = peakRow[3];
+        const tmax = peakRow[4];
+        peakSummary.textContent = `Peak: ${chName} = ${vmax} at t = ${tmax} s`;
+      } else {
+        peakSummary.textContent = '';
+      }
+
+      // Optional: show how the window was applied
+      if (window && window.scan_frequency) {
+        const fs = window.scan_frequency;
+        const pre = window.pre_samples || 0;
+        const post = window.post_samples || 0;
+        const preT = pre && fs ? (pre / fs).toFixed(4) : '0';
+        const postT = post && fs ? (post / fs).toFixed(4) : '0';
+        if (window.export_only_after_trigger) {
+          statsWindowInfo.textContent =
+            `Stats window: trigger ± (${preT} s pre, ${postT} s post)`;
+        } else {
+          statsWindowInfo.textContent = 'Stats window: full record (no trigger cropping).';
+        }
+      } else {
+        statsWindowInfo.textContent = '';
+      }
     })
     .catch(err => {
-      alert('Stats not available yet. Run a capture first.');
       console.error(err);
+      alert('Failed to load stats: ' + err);
     });
 });
 
-btnReport.addEventListener('click', () => {
-  window.open('/api/export/report', '_blank');
+
+
+
+// btnReport.addEventListener('click', () => {
+//   window.open('/api/export/report', '_blank');
+// });
+const btnDownloadReport = document.getElementById('btn-download-report');
+const reportDialog = document.getElementById('report-dialog');
+const reportDateTime = document.getElementById('report-datetime');
+const reportClient = document.getElementById('report-client');
+const reportItem = document.getElementById('report-item');
+const reportNotes = document.getElementById('report-notes');
+const reportIncludeData = document.getElementById('report-include-data');
+const reportCancel = document.getElementById('report-cancel');
+const reportGenerate = document.getElementById('report-generate');
+
+function showReportDialog() {
+  // Prefill with now + settings
+  const now = new Date();
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  const dtStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ` +
+                `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  reportDateTime.value = dtStr;
+
+  // Load settings to prefill Client / Item / Notes
+  fetch('/api/settings')
+    .then(r => r.json())
+    .then(cfg => {
+      reportClient.value = cfg.client || '';
+      reportItem.value = cfg.item || '';
+      reportNotes.value = cfg.notes || '';
+    })
+    .catch(() => {
+      // ignore; user can fill manually
+    });
+
+  reportIncludeData.checked = true;
+  reportDialog.classList.remove('hidden');
+}
+
+btnDownloadReport.addEventListener('click', () => {
+  showReportDialog();
+});
+
+reportCancel.addEventListener('click', () => {
+  reportDialog.classList.add('hidden');
+});
+
+reportGenerate.addEventListener('click', () => {
+  const payload = {
+    datetime: reportDateTime.value || null,
+    client: reportClient.value || null,
+    item: reportItem.value || null,
+    notes: reportNotes.value || null,
+    include_data: reportIncludeData.checked
+  };
+
+  // POST to /api/export/report and stream back the file
+  fetch('/api/export/report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  })
+  .then(r => {
+    if (!r.ok) {
+      return r.json().then(j => {
+        throw new Error(j.detail || 'Export failed');
+      }).catch(() => {
+        throw new Error('Export failed');
+      });
+    }
+    const disposition = r.headers.get('Content-Disposition') || '';
+    let filename = 'impact_report.zip';
+    const m = /filename="?([^"]+)"?/.exec(disposition);
+    if (m) filename = m[1];
+
+    return r.blob().then(blob => ({blob, filename}));
+  })
+  .then(({blob, filename}) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    reportDialog.classList.add('hidden');
+  })
+  .catch(err => {
+    alert(err.message || 'Export failed');
+  });
 });
 
 initChart();

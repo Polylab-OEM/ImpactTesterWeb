@@ -1,0 +1,55 @@
+{
+  "client": "",
+  "item": "",
+  "notes": "",
+  "channels": [
+    {
+      "ain": 0,
+      "label": "Force",
+      "multiplier": 25.0,
+      "enabled": true
+    },
+    {
+      "ain": 1,
+      "label": "Aux",
+      "multiplier": 1.0,
+      "enabled": false
+    },
+    {
+      "ain": 2,
+      "label": "CH2",
+      "multiplier": 1.0,
+      "enabled": false
+    },
+    {
+      "ain": 3,
+      "label": "CH3",
+      "multiplier": 1.0,
+      "enabled": false
+    }
+  ],
+  "trigger": {
+    "enable": true,
+    "trigger_ain": 0,
+    "threshold_volts": 0.1,
+    "rising": true,
+    "use_digital": false,
+    "digital_line": 0,
+    "digital_rising": true,
+    "digital_level_mode": false,
+    "digital_active_high": true,
+    "digital_debounce_ms": 0,
+    "pre_samples": 500,
+    "post_samples": 500,
+    "safety_timeout_sec": 15.0
+  },
+  "stream": {
+    "scan_frequency": 30000,
+    "resolution_index": 0,
+    "settling_factor": 0,
+    "duration_sec": 5.0,
+    "ui_plot_hz": 1000
+  },
+  "output_dir": "C:\\Users\\IISRI - ROBOTICS\\Downloads\\ImpactTesterWeb-main\\ImpactTesterWeb-main",
+  "export_only_after_trigger": true
+}
